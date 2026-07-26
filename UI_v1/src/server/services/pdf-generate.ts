@@ -1,13 +1,35 @@
 import PDFDocument from "pdfkit";
 
 import type { ResumeAnalysis } from "../types";
+import {
+  FONT_REGULAR_B64,
+  FONT_BOLD_B64,
+  FONT_ITALIC_B64,
+} from "../assets/fonts-data.generated";
+
+// PDFKit's built-in "Helvetica" fonts read font-metric files via `__dirname`,
+// which doesn't exist in the ESM serverless bundle Vercel deploys (causes a
+// runtime "__dirname is not defined" crash). We sidestep this entirely by
+// embedding our own TTF fonts as base64 directly in the JS bundle, so there's
+// no separate asset file that could fail to be traced/copied during deploy.
+const FONT_REGULAR = Buffer.from(FONT_REGULAR_B64, "base64");
+const FONT_BOLD = Buffer.from(FONT_BOLD_B64, "base64");
+const FONT_ITALIC = Buffer.from(FONT_ITALIC_B64, "base64");
 
 export async function renderPdf(analysis: ResumeAnalysis): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: "LETTER",
       margins: { top: 54, bottom: 54, left: 54, right: 54 },
+      // Disable PDFKit's automatic default-font loading: it would otherwise
+      // call the broken __dirname-based standard-font loader right here in
+      // the constructor, before we get a chance to register our own fonts.
+      font: false as unknown as string,
     });
+
+    doc.registerFont("Helvetica", FONT_REGULAR);
+    doc.registerFont("Helvetica-Bold", FONT_BOLD);
+    doc.registerFont("Helvetica-Oblique", FONT_ITALIC);
 
     const chunks: Buffer[] = [];
     doc.on("data", (chunk: Buffer) => chunks.push(chunk));
