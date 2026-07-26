@@ -52,6 +52,7 @@
     "input-otp": "^1.4.2",
     "lucide-react": "^0.575.0",
     "cheerio": "^1.1.2",
+    "tslib": "^2.8.1",
     "jszip": "^3.10.1",
     "pdfkit": "^0.17.1",
     "unpdf": "^1.1.0",
