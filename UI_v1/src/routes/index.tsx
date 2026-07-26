@@ -21,6 +21,12 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
+import {
+  downloadBase64File,
+  parseSuggestions,
+  tailorResumeRequest,
+  type TailorResponse,
+} from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
@@ -65,13 +71,17 @@ function Home() {
   const { theme, toggle } = useTheme();
   const [stage, setStage] = useState<Stage>("input");
   const [resume, setResume] = useState<UploadedFile | null>(null);
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [jdMode, setJdMode] = useState<JDMode>("text");
   const [jdText, setJdText] = useState("");
   const [jdUrl, setJdUrl] = useState("");
   const [jdFile, setJdFile] = useState<UploadedFile | null>(null);
+  const [jdFileObject, setJdFileObject] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [step, setStep] = useState(0);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [tailorResult, setTailorResult] = useState<TailorResponse | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
 
   const jdReady = useMemo(() => {
     if (jdMode === "text") return jdText.trim().length > 20;
@@ -85,32 +95,64 @@ function Home() {
     if (file.type !== "application/pdf") return;
     if (file.size > 10 * 1024 * 1024) return;
     setResume({ name: file.name, size: file.size });
+    setResumeFile(file);
   };
 
-  const startTailor = () => {
+  const handleJobFile = (file: File) => {
+    if (file.size > 10 * 1024 * 1024) return;
+    setJdFile({ name: file.name, size: file.size });
+    setJdFileObject(file);
+  };
+
+  const startTailor = async () => {
+    if (!resumeFile) return;
+
     setStage("processing");
     setStep(0);
-    let i = 0;
-    const tick = () => {
-      i += 1;
-      if (i >= STEPS.length) {
-        setStep(STEPS.length);
-        setTimeout(() => setStage("results"), 500);
-      } else {
-        setStep(i);
-        setTimeout(tick, 900);
-      }
+    setProcessingError(null);
+    setTailorResult(null);
+
+    const advance = (target: number) => {
+      setStep((current) => Math.max(current, target));
     };
-    setTimeout(tick, 900);
+
+    const timers = [
+      setTimeout(() => advance(1), 600),
+      setTimeout(() => advance(2), 1800),
+      setTimeout(() => advance(3), 3200),
+    ];
+
+    try {
+      const result = await tailorResumeRequest({
+        resume: resumeFile,
+        jobMode: jdMode,
+        jobText: jdText,
+        jobUrl: jdUrl,
+        jobFile: jdFileObject,
+      });
+
+      timers.forEach(clearTimeout);
+      setStep(STEPS.length);
+      setTailorResult(result);
+      setTimeout(() => setStage("results"), 400);
+    } catch (error) {
+      timers.forEach(clearTimeout);
+      setProcessingError(error instanceof Error ? error.message : "Tailoring failed.");
+      setStep(0);
+    }
   };
 
   const reset = () => {
     setStage("input");
     setResume(null);
+    setResumeFile(null);
     setJdText("");
     setJdUrl("");
     setJdFile(null);
+    setJdFileObject(null);
     setStep(0);
+    setTailorResult(null);
+    setProcessingError(null);
   };
 
   return (
@@ -271,7 +313,10 @@ function Home() {
                           />
                         </label>
                         <button
-                          onClick={() => setResume(null)}
+                          onClick={() => {
+                            setResume(null);
+                            setResumeFile(null);
+                          }}
                           aria-label="Remove file"
                           className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
                         >
@@ -367,7 +412,7 @@ function Home() {
                           className="hidden"
                           onChange={(e) => {
                             const f = e.target.files?.[0];
-                            if (f) setJdFile({ name: f.name, size: f.size });
+                            if (f) handleJobFile(f);
                           }}
                         />
                       </label>
@@ -381,7 +426,10 @@ function Home() {
                           </div>
                         </div>
                         <button
-                          onClick={() => setJdFile(null)}
+                          onClick={() => {
+                            setJdFile(null);
+                            setJdFileObject(null);
+                          }}
                           aria-label="Remove"
                           className="rounded-lg p-2 text-muted-foreground hover:text-destructive"
                         >
@@ -421,6 +469,11 @@ function Home() {
                 <p className="mt-1 text-sm text-muted-foreground">
                   Sit tight, this usually takes under a minute.
                 </p>
+                {processingError && (
+                  <div className="mx-auto mt-5 max-w-md rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                    {processingError}
+                  </div>
+                )}
               </div>
 
               <ol className="mx-auto mt-10 max-w-sm space-y-3">
@@ -470,10 +523,23 @@ function Home() {
                   );
                 })}
               </ol>
+
+              {processingError && (
+                <div className="mt-8 flex justify-center gap-2">
+                  <button
+                    onClick={() => setStage("input")}
+                    className="rounded-full border border-border bg-card px-5 py-2.5 text-sm font-medium transition-colors hover:bg-muted"
+                  >
+                    Back to upload
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          {stage === "results" && <Results onReset={reset} />}
+          {stage === "results" && tailorResult && (
+            <Results onReset={reset} result={tailorResult} />
+          )}
         </section>
 
         {/* How it works */}
@@ -556,11 +622,34 @@ function Home() {
   );
 }
 
-function Results({ onReset }: { onReset: () => void }) {
+function Results({ onReset, result }: { onReset: () => void; result: TailorResponse }) {
+  const { analysis, files } = result;
+  const suggestions = parseSuggestions(analysis.suggestions);
   const downloads = [
-    { icon: FileDown, label: "PDF", desc: "Ready to send", ext: ".pdf" },
-    { icon: FileCode, label: "LaTeX", desc: "Editable source", ext: ".tex" },
-    { icon: FileArchive, label: "ZIP Bundle", desc: "PDF + LaTeX", ext: ".zip" },
+    {
+      icon: FileDown,
+      label: "PDF",
+      desc: "Ready to send",
+      ext: ".pdf",
+      onDownload: () =>
+        downloadBase64File(files.pdfBase64, files.pdfFilename, "application/pdf"),
+    },
+    {
+      icon: FileCode,
+      label: "LaTeX",
+      desc: "Editable source",
+      ext: ".tex",
+      onDownload: () =>
+        downloadBase64File(files.texBase64, files.texFilename, "application/x-tex"),
+    },
+    {
+      icon: FileArchive,
+      label: "ZIP Bundle",
+      desc: "PDF + LaTeX",
+      ext: ".zip",
+      onDownload: () =>
+        downloadBase64File(files.zipBase64, files.zipFilename, "application/zip"),
+    },
   ];
   return (
     <div className="space-y-6">
@@ -579,6 +668,7 @@ function Results({ onReset }: { onReset: () => void }) {
             return (
               <button
                 key={d.label}
+                onClick={d.onDownload}
                 className="group flex flex-col items-center gap-2 rounded-xl bg-background p-5 shadow-neu-sm transition-all hover:-translate-y-0.5 hover:shadow-neu"
               >
                 <Icon className="h-6 w-6 text-primary" />
@@ -601,14 +691,18 @@ function Results({ onReset }: { onReset: () => void }) {
               Matched
             </div>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {["TypeScript", "React", "Node.js", "AWS", "REST APIs"].map((k) => (
-                <span
-                  key={k}
-                  className="rounded-full bg-success/10 px-2.5 py-1 text-xs text-success"
-                >
-                  {k}
-                </span>
-              ))}
+              {analysis.keyword_matches.length ? (
+                analysis.keyword_matches.map((k) => (
+                  <span
+                    key={k}
+                    className="rounded-full bg-success/10 px-2.5 py-1 text-xs text-success"
+                  >
+                    {k}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-muted-foreground">No direct matches found.</span>
+              )}
             </div>
           </div>
           <div>
@@ -616,14 +710,18 @@ function Results({ onReset }: { onReset: () => void }) {
               Missing
             </div>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {["GraphQL", "Kubernetes", "CI/CD"].map((k) => (
-                <span
-                  key={k}
-                  className="rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground"
-                >
-                  {k}
-                </span>
-              ))}
+              {analysis.keyword_missing.length ? (
+                analysis.keyword_missing.map((k) => (
+                  <span
+                    key={k}
+                    className="rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground"
+                  >
+                    {k}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-muted-foreground">No major gaps detected.</span>
+              )}
             </div>
           </div>
           <div>
@@ -631,9 +729,11 @@ function Results({ onReset }: { onReset: () => void }) {
               Suggestions
             </div>
             <ul className="mt-3 space-y-2 text-xs text-muted-foreground">
-              <li>· Highlight cloud infrastructure work</li>
-              <li>· Quantify shipped features</li>
-              <li>· Add a brief summary at the top</li>
+              {suggestions.length ? (
+                suggestions.map((item) => <li key={item}>· {item}</li>)
+              ) : (
+                <li>· {analysis.suggestions || "Review the tailored resume before sending."}</li>
+              )}
             </ul>
           </div>
         </div>
